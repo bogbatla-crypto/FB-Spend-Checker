@@ -32,10 +32,37 @@ API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
+
+# Общая сессия: держит cookies между запросами, как настоящий браузер,
+# а не как голый разовый запрос без истории.
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
+_warmed_up = False
+
+
+def warm_up():
+    """Один раз заходим на главную facebook.com, чтобы получить обычные cookies."""
+    global _warmed_up
+    if _warmed_up:
+        return
+    try:
+        SESSION.get("https://www.facebook.com/", timeout=15)
+    except Exception:  # noqa: BLE001
+        log.exception("Не получилось выполнить прогрев сессии")
+    _warmed_up = True
 
 ID_RE = re.compile(r"(?:id=|library/)(\d{8,})")
 PLAIN_ID_RE = re.compile(r"^\d{8,}$")
@@ -60,8 +87,13 @@ def fetch_spend(ad_id: str):
     Возвращает dict с полями: found (bool), shows, spend_lower, spend_upper,
     spend_exact, currency, raw_note.
     """
-    url = f"https://www.facebook.com/ads/library/?id={ad_id}"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+    warm_up()
+    url = f"https://www.facebook.com/ads/library/?id={ad_id}&country=ALL"
+    resp = SESSION.get(
+        url,
+        timeout=15,
+        headers={"Referer": "https://www.facebook.com/ads/library/"},
+    )
     resp.raise_for_status()
     html = resp.text
 
@@ -166,6 +198,16 @@ def handle_update(update: dict):
     try:
         data = fetch_spend(ad_id)
         reply = format_reply(ad_id, data)
+    except requests.HTTPError as e:
+        log.exception("HTTP-ошибка при обработке %s", ad_id)
+        if e.response is not None and e.response.status_code == 403:
+            reply = (
+                f"Facebook временно заблокировал запрос по объявлению {ad_id} "
+                "(похоже на антибот-проверку). Попробуй ещё раз через минуту — "
+                "если повторится, напиши мне, буду донастраивать."
+            )
+        else:
+            reply = f"Не получилось обработать объявление {ad_id}: {e}"
     except Exception as e:  # noqa: BLE001
         log.exception("Ошибка при обработке %s", ad_id)
         reply = f"Не получилось обработать объявление {ad_id}: {e}"
