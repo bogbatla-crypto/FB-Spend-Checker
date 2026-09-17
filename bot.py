@@ -16,6 +16,7 @@ Telegram-бот: проверка спенда рекламного объявл
 
 import os
 import re
+import json
 import logging
 import time
 
@@ -29,10 +30,68 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 if not TELEGRAM_TOKEN:
     raise SystemExit("Не задана переменная окружения TELEGRAM_BOT_TOKEN")
 
+FB_COOKIES_RAW = os.environ.get("FB_COOKIES_JSON", "").strip()
+
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 ID_RE = re.compile(r"(?:id=|library/)(\d{8,})")
 PLAIN_ID_RE = re.compile(r"^\d{8,}$")
+
+
+def _same_site(value):
+    """Cookie-Editor и Playwright по-разному называют значения sameSite."""
+    if not value:
+        return "Lax"
+    value = str(value).lower()
+    if value in ("no_restriction", "none"):
+        return "None"
+    if value in ("strict",):
+        return "Strict"
+    return "Lax"
+
+
+def load_fb_cookies():
+    """
+    Превращает JSON-экспорт из расширения Cookie-Editor в формат,
+    который понимает Playwright (context.add_cookies).
+    Ничего не логирует и не печатает значения cookies — только факт успеха/неуспеха.
+    """
+    if not FB_COOKIES_RAW:
+        log.warning("FB_COOKIES_JSON не задан — бот будет заходить анонимно (без логина)")
+        return []
+
+    try:
+        raw = json.loads(FB_COOKIES_RAW)
+    except json.JSONDecodeError:
+        log.error("FB_COOKIES_JSON не распознан как JSON — проверь, что скопировано целиком")
+        return []
+
+    cookies = []
+    for c in raw:
+        name = c.get("name")
+        value = c.get("value")
+        domain = c.get("domain") or ".facebook.com"
+        if not name or value is None:
+            continue
+        entry = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": c.get("path", "/"),
+            "httpOnly": bool(c.get("httpOnly", False)),
+            "secure": bool(c.get("secure", True)),
+            "sameSite": _same_site(c.get("sameSite")),
+        }
+        expires = c.get("expirationDate")
+        if expires:
+            entry["expires"] = int(expires)
+        cookies.append(entry)
+
+    log.info("Загружено %d cookies для facebook.com", len(cookies))
+    return cookies
+
+
+FB_COOKIES = load_fb_cookies()
 
 _playwright = None
 _browser = None
@@ -74,6 +133,8 @@ def fetch_spend(ad_id: str):
         ),
         locale="en-US",
     )
+    if FB_COOKIES:
+        context.add_cookies(FB_COOKIES)
     page = context.new_page()
     try:
         url = f"https://www.facebook.com/ads/library/?id={ad_id}&country=ALL"
